@@ -1,0 +1,17 @@
+{
+  "name": "neftify",
+  "version": "1.0.0",
+  "description": "A Decentralized Protocol for Earning Interest on Non-Fungible Assets",
+  "main": "truffle-config.js",
+  "directories": {
+    "test": "test"
+  },
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "author": "Neftify Labs, INC",
+  "license": "ISC",
+  "dependencies": {
+    "@openzeppelin/contracts": "^4.2.0"
+  }
+}
