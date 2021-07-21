@@ -97,14 +97,84 @@ contract Nswap is Ownable, Pausable {
 
             // DEFI Protocol API - Send Collateral to work
             lentNswapList[tokenAddress][tokenId].defiTokens = 0;
-            ///////////
+            //  ** To CODE **
+            ///////////////////////////////////////////////
 
             emit NswapForLendUpdated(tokenAddress, tokenId);
         }
     }
 
+    function stopBorrowing(address tokenAddress, uint256 tokenId) public whenNotPaused {
+        address _lender = lentNswapList[tokenAddress][tokenId].lender;
+
+        address _borrower = lentNswapList[tokenAddress][tokenId].borrower;
+        require(_borrower = msg.sender, 'Only the active borrower can stop borrowing');
+
+        if (lentNswapList[tokenAddress][tokenId].lenderClaimedCollateral == false) {
+            // Assuming NFT token transfer is approved
+            IERC721(tokenAddress).transferFrom(msg.sender, address(this), tokenId);
+
+            // Get the collateral from DEFI Protocol
+            uint256 _initialWorth = lendNswapList[tokenAddress][tokenId].initialWorth;
+            uint256 _defiTokens = lendNswapList[tokenAddress][tokenId].defiTokens;
+            uint256 _interestEarned = 0; //placeholder value for now
+            ///
+            //  ** To CODE **
+            /////////////////////////////////////
+
+            // Send back the collateral to the Borrower
+            IERC20(acceptedPayTokenAddress).transfer(_borrower, _initialWorth);
+
+            // Send the interest to the lender if there is interest to send
+            if (_interestEarned > 0) {
+                uint256 _platformFee = lendNswapList[tokenAddress][tokenId].platformFeesPercent;
+                uint256 _interestEarnedtMinusFees = _interestEarned * (1-_platformFee);
+
+                IERC20(acceptedPayTokenAddress).transfer(_lender, _interestEarnedMinusFees);
+            }
+
+            // Reset settings so the token can be borrowed again
+            lentNswapList[tokenAddress][tokenId].borrower = address(0);
+            lentNswapList[tokenAddress][tokenId].borrowedAtTimestamp = 0;
+        }
+        else {
+            // Lender already claimed collateral, borrower can keep token it
+            lentNswapList[tokenAddress][tokenId] = ERC721ForLend(0, 0, 0, 0, address(0), address(0), false, 0);
+        }
+
+        emit NswapForLendUpdated(tokenAddress, tokenId);
+    }
+
+    function removeFromLendersWithTokens(address tokenAddress, uint256 tokenId) internal {
+        // Reset lenders to sent token mapping, swap with last element to fill the gap
+        uint totalCount = lendersWithTokens.length;
+        if (totalCount > 1) {
+            for (uint i=0; i<totalCount; i++) {
+                NswapTokenEntry memory tokenEntry = lendersWithTokens[i];
+                if (tokenEntry.lenderAddress == msg.sender && tokenEntry.tokenAddress == tokenAddress && tokenEntry.tokenId == tokenId) {
+                    lenderWithTokens[i] = lendersWithTokens[totalCount-1]; // insert last from array
+                }
+            }
+            lenderWithTokens.length--; 
+        }
+        else {
+            delete lenderWithTokens[0];        
+        }
+    }
+
+    function isDurationExpired(uint256 borrowedAtTimestamp, uint256 durationHours) public view returns(bool) {
+        uint256 secondsPassed = now - borrowedAtTimestamp;
+        uint256 hoursPassed = secondsPassed * 60 * 60;
+        return hoursPassed > durationHours;
+    }
+
     function calculateLendSum(address tokenAddress, uint256 tokenId) public view returns(bool) {
         uint256 _initialWorth = lentNswapList[tokenAddress][tokenId].initialWorth;
         return _initialWorth;
+    }
+
+    function isValidNFT(address tokenAddress, uint256 tokenId) public view returns(bool) {
+        // No owner is most likely burnt NFT
+        return IERC721(tokenAddress).ownerOf(tokenId) != address(0);
     }
 }
