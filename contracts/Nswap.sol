@@ -37,11 +37,11 @@ contract Nswap is Ownable, Pausable {
     event NswapForLendUpdated(address tokenAddress, uint256 tokenId);
     event NswapForLendRemoved(address tokenAddress, uint256 tokenId);
 
-    function setAcceptedPayTokenAddress(address tokenAddress) public onlyOwner {
+    function setAcceptedPayTokenAddress(address tokenAddress) public onlyOwner whenNotPaused {
         acceptedPayTokenAddress = tokenAddress;
     }
 
-    function setPlatformFeesPercent(uint256 feePercent) public onlyOwner {
+    function setPlatformFeesPercent(uint256 feePercent) public onlyOwner whenNotPaused {
         platformFeesPercent = feePercent;
     }
 
@@ -53,11 +53,11 @@ contract Nswap is Ownable, Pausable {
         _unpause();
     }
 
-    function setLendSettings(address tokenAddress, uint256 tokenId, uint256 durationHours, uint256 initialWorth) public whenNotPaused {
-        require(initialWorth > 0, 'Initial token must be woth more than 0');
-        require(durationHours > 24, 'Lending duration must be 1 day or above');
-        require(lentNswapList[tokenAddress][tokenId].borrower == address(0), 'Token already lent');
-        require(lentNswapList[tokenAddress][tokenId].lenderClaimedCollateral == false, 'Time already expired and collateral was liquidated to lender');
+    function addToLending(address tokenAddress, uint256 tokenId, uint256 durationHours, uint256 initialWorth) public whenNotPaused {
+        require(initialWorth > 0, 'Add: Initial token must be woth more than 0');
+        require(durationHours > 24, 'Add: Lending duration must be 1 day or above');
+        require(lentNswapList[tokenAddress][tokenId].borrower == address(0), 'Add: Token already lent');
+        require(lentNswapList[tokenAddress][tokenId].lenderClaimedCollateral == false, 'Add: Time already expired and collateral was liquidated to lender');
 
         IERC721(tokenAddress).transferFrom(msg.sender, address(this), tokenId);
 
@@ -68,15 +68,62 @@ contract Nswap is Ownable, Pausable {
         emit NswapForLendUpdated(tokenAddress, tokenId);
     }
 
+    function removeFromLending(address tokenAddress, uint256 tokenId) public whenNotPaused {
+        require(lentNswapList[tokenAddress][tokenId].lender == msg.sender, 'Remove: Only the lender can perform this action');
+        require(lentNswapList[tokenAddress][tokenId].borrower == address(0), 'Remove: There is someone borrowing it, once they return it you can cancel lending');
+        require(lentNswapList[tokenAddress][tokenId].lenderClaimedCollateral == false, 'Remove: Collateral was already claimed');
+
+        // check if needs approval as some tokens fail due this
+        (bool success,) = tokenAddress.call(abi.encodeWithSignature(
+            "approve(address,uint256)",
+            address(this),
+            tokenId
+        ));
+        if (success) {
+            IERC721(tokenAddress).approve(address(this), tokenId);
+        }
+
+        IERC721(tokenAddress).transferFrom(address(this), msg.sender, tokenId);
+
+        // reset lenders to sent token mapping, swap with last element to fill the gap
+        lentNswapList[tokenAddress][tokenId] = NswapForLend(0, 0, 0, 0, address(0), address(0), false, 0);
+        removeFromLendersWithTokens(tokenAddress, tokenId);
+
+        emit NswapForLendRemoved(tokenAddress, tokenId);
+    }
+
+    function claimBorrowerCollateral(address tokenAddress, uint256 tokenId) public whenNotPaused {
+        require(lentNswapList[tokenAddress][tokenId].borrower != address(0), 'Claim: Cannot claim when borrowing has ended');
+        require(lentNswapList[tokenAddress][tokenId].lender == msg.sender, 'Claim: Cannot claim if you are not the lender');
+
+        uint256 _borrowedAtTimestamp = lentNswapList[tokenAddress][tokenId].borrowedAtTimestamp;
+        uint256 _durationHours = lentNswapList[tokenAddress][tokenId].durationHours;
+
+        require(isDurationExpired(_borrowedAtTimestamp, _durationHours), 'Claim: Cannot claim before lending expires');
+        require(lentNswapList[tokenAddress][tokenId].lenderClaimedCollateral == false, 'Claim: Already claimed collateral');
+
+        ////////////////////////////
+        //**  */
+        //send collateral with interest to the lender minus platform fees
+        //** to code */
+        ////////////////////////////
+
+        // reset lenders to sent token mapping, swap with last element to fill gap
+        lentNswapList[tokenAddress][tokenId].lenderClaimedCollateral = true;
+        removeFromLendersWithTokens(tokenAddress, tokenId);
+
+        emit NswapForLendUpdated(tokenAddress, tokenId);
+    }
+
     function startBorrowing(address tokenAddress, uint256 tokenId) public whenNotPaused {
-        require(lentNswapList[tokenAddress][tokenId].borrower == address(0), 'Already lent');
-        require(lentNswapList[tokenAddress][tokenId].initialWorth > 0, 'Collateral requirement has not been set by lender');
+        require(lentNswapList[tokenAddress][tokenId].borrower == address(0), 'Borrowing: Already lent');
+        require(lentNswapList[tokenAddress][tokenId].initialWorth > 0, 'Borrowing: Collateral requirement has not been set by lender');
 
         IERC_20 _payToken = IERC20(acceptedPayTokenAddress);
         uint256 _requireSum = calculateLendSum(tokenAddress, tokenId);
         uint256 _allowedCollateral = _payToken.allowance(msg.sender, address(this));
 
-        require(_allowedCollateral >= _requiredSum, 'Not enough collateral received');
+        require(_allowedCollateral >= _requiredSum, 'Borrowing: Not enough collateral received');
 
         IERC20(acceptedPayTokenAddress).transferfrom(msg.sender, address(this), _requiredSum);
 
@@ -86,34 +133,35 @@ contract Nswap is Ownable, Pausable {
             address(this),
             tokenId
         ));
-
         if (success) {
             IERC721(tokenAddress).approve(address(this), tokenId);
-
-            IERC721(tokenAddress).transferFrom(address(this), msg.sender, tokenId);
-
-            lentNswapList[tokenAddress][tokenId].borrower = msg.sender;
-            lentNswapList[tokenAddress][tokenId].borrowedAtTimestamp = now;
-
-            // DEFI Protocol API - Send Collateral to work
-            lentNswapList[tokenAddress][tokenId].defiTokens = 0;
-            //  ** To CODE **
-            ///////////////////////////////////////////////
-
-            emit NswapForLendUpdated(tokenAddress, tokenId);
         }
+
+        IERC721(tokenAddress).transferFrom(address(this), msg.sender, tokenId);
+
+        lentNswapList[tokenAddress][tokenId].borrower = msg.sender;
+        lentNswapList[tokenAddress][tokenId].borrowedAtTimestamp = now;
+
+        ////////////////////////////
+        // DEFI Protocol API - Send Collateral to work
+        lentNswapList[tokenAddress][tokenId].defiTokens = 0;
+        //  ** To CODE **
+        ////////////////////////////
+
+        emit NswapForLendUpdated(tokenAddress, tokenId);
     }
 
     function stopBorrowing(address tokenAddress, uint256 tokenId) public whenNotPaused {
         address _lender = lentNswapList[tokenAddress][tokenId].lender;
 
         address _borrower = lentNswapList[tokenAddress][tokenId].borrower;
-        require(_borrower = msg.sender, 'Only the active borrower can stop borrowing');
+        require(_borrower = msg.sender, 'Stop: Only the active borrower can stop borrowing');
 
         if (lentNswapList[tokenAddress][tokenId].lenderClaimedCollateral == false) {
             // Assuming NFT token transfer is approved
             IERC721(tokenAddress).transferFrom(msg.sender, address(this), tokenId);
 
+            ////////////////////////////
             // Get the collateral from DEFI Protocol
             uint256 _initialWorth = lendNswapList[tokenAddress][tokenId].initialWorth;
             uint256 _defiTokens = lendNswapList[tokenAddress][tokenId].defiTokens;
@@ -139,7 +187,12 @@ contract Nswap is Ownable, Pausable {
         }
         else {
             // Lender already claimed collateral, borrower can keep token it
-            lentNswapList[tokenAddress][tokenId] = ERC721ForLend(0, 0, 0, 0, address(0), address(0), false, 0);
+            lentNswapList[tokenAddress][tokenId] = NswapForLend(0, 0, 0, 0, address(0), address(0), false, 0); //reset
+
+            /////////////////////////////////////
+            // Let the borrower know that he can keep the NFT
+            //  ** To CODE **
+            /////////////////////////////////////
         }
 
         emit NswapForLendUpdated(tokenAddress, tokenId);
