@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: BUSL-1.1
 pragma solidity ^0.8.0;
 
 import "@openzeppelin/contracts/token/ERC20/IERC20.sol";
@@ -13,7 +14,7 @@ contract Nswap is Ownable, Pausable {
     uint256 migrateVersion;
 
     address public acceptedPayTokenAddress;
-    uint256 public platformFeesPercent;
+    uint256 public protocolFeesPercent;
 
     struct NswapForLend {
         uint256 durationHours;
@@ -23,7 +24,7 @@ contract Nswap is Ownable, Pausable {
         address lender;
         address borrower;
         bool lenderClaimedCollateral;
-        uint256 platformFeesPercent;
+        uint256 protocolFeesPercent;
     }
     mapping(address => mapping(uint256 => NswapForLend)) public lentNswapList;
 
@@ -37,20 +38,20 @@ contract Nswap is Ownable, Pausable {
     event NswapForLendUpdated(address tokenAddress, uint256 tokenId);
     event NswapForLendRemoved(address tokenAddress, uint256 tokenId);
 
-    function setAcceptedPayTokenAddress(address tokenAddress) public onlyOwner whenNotPaused {
-        acceptedPayTokenAddress = tokenAddress;
-    }
-
-    function setPlatformFeesPercent(uint256 feePercent) public onlyOwner whenNotPaused {
-        platformFeesPercent = feePercent;
-    }
-
     function pauseSmartContract() public onlyOwner whenNotPaused {
         _pause();
     }
 
     function unpauseSmartContract() public onlyOwner whenPaused {
         _unpause();
+    }
+
+    function setAcceptedPayTokenAddress(address tokenAddress) public onlyOwner whenNotPaused {
+        acceptedPayTokenAddress = tokenAddress;
+    }
+
+    function setProtocolFeesPercent(uint256 feePercent) public onlyOwner whenNotPaused {
+        protocolFeesPercent = feePercent;
     }
 
     function addToLending(address tokenAddress, uint256 tokenId, uint256 durationHours, uint256 initialWorth) public whenNotPaused {
@@ -61,7 +62,7 @@ contract Nswap is Ownable, Pausable {
 
         IERC721(tokenAddress).transferFrom(msg.sender, address(this), tokenId);
 
-        lentNswapList[tokenAddress][tokenId] = NswapForLend(durationHours, initialWorth, 0, 0, msg.sender, address(0), false, platformFeesPercent);
+        lentNswapList[tokenAddress][tokenId] = NswapForLend(durationHours, initialWorth, 0, 0, msg.sender, address(0), false, protocolFeesPercent);
 
         lendersWithTokens.push(NswapTokenEntry(msg.sender, tokenAddress, tokenId));
 
@@ -95,11 +96,7 @@ contract Nswap is Ownable, Pausable {
     function claimBorrowerCollateral(address tokenAddress, uint256 tokenId) public whenNotPaused {
         require(lentNswapList[tokenAddress][tokenId].borrower != address(0), 'Claim: Cannot claim when borrowing has ended');
         require(lentNswapList[tokenAddress][tokenId].lender == msg.sender, 'Claim: Cannot claim if you are not the lender');
-
-        uint256 _borrowedAtTimestamp = lentNswapList[tokenAddress][tokenId].borrowedAtTimestamp;
-        uint256 _durationHours = lentNswapList[tokenAddress][tokenId].durationHours;
-
-        require(isDurationExpired(_borrowedAtTimestamp, _durationHours), 'Claim: Cannot claim before lending expires');
+        require(isDurationExpired(tokenAddress, tokenId), 'Claim: Cannot claim before lending expires');
         require(lentNswapList[tokenAddress][tokenId].lenderClaimedCollateral == false, 'Claim: Already claimed collateral');
 
         ////////////////////////////
@@ -119,13 +116,12 @@ contract Nswap is Ownable, Pausable {
         require(lentNswapList[tokenAddress][tokenId].borrower == address(0), 'Borrowing: Already lent');
         require(lentNswapList[tokenAddress][tokenId].initialWorth > 0, 'Borrowing: Collateral requirement has not been set by lender');
 
-        IERC_20 _payToken = IERC20(acceptedPayTokenAddress);
-        uint256 _requireSum = calculateLendSum(tokenAddress, tokenId);
-        uint256 _allowedCollateral = _payToken.allowance(msg.sender, address(this));
+        uint256 _requiredSum = calculateLendSum(tokenAddress, tokenId);
+        uint256 _allowedCollateral = IERC20(acceptedPayTokenAddress).allowance(msg.sender, address(this));
 
         require(_allowedCollateral >= _requiredSum, 'Borrowing: Not enough collateral received');
 
-        IERC20(acceptedPayTokenAddress).transferfrom(msg.sender, address(this), _requiredSum);
+        IERC20(acceptedPayTokenAddress).transferFrom(msg.sender, address(this), _requiredSum);
 
         // check if needs approval as some tokens fail due this
         (bool success,) = tokenAddress.call(abi.encodeWithSignature(
@@ -140,7 +136,7 @@ contract Nswap is Ownable, Pausable {
         IERC721(tokenAddress).transferFrom(address(this), msg.sender, tokenId);
 
         lentNswapList[tokenAddress][tokenId].borrower = msg.sender;
-        lentNswapList[tokenAddress][tokenId].borrowedAtTimestamp = now;
+        lentNswapList[tokenAddress][tokenId].borrowedAtTimestamp = block.timestamp;
 
         ////////////////////////////
         // DEFI Protocol API - Send Collateral to work
@@ -155,7 +151,7 @@ contract Nswap is Ownable, Pausable {
         address _lender = lentNswapList[tokenAddress][tokenId].lender;
 
         address _borrower = lentNswapList[tokenAddress][tokenId].borrower;
-        require(_borrower = msg.sender, 'Stop: Only the active borrower can stop borrowing');
+        require(_borrower == msg.sender, 'Stop: Only the active borrower can stop borrowing');
 
         if (lentNswapList[tokenAddress][tokenId].lenderClaimedCollateral == false) {
             // Assuming NFT token transfer is approved
@@ -163,8 +159,8 @@ contract Nswap is Ownable, Pausable {
 
             ////////////////////////////
             // Get the collateral from DEFI Protocol
-            uint256 _initialWorth = lendNswapList[tokenAddress][tokenId].initialWorth;
-            uint256 _defiTokens = lendNswapList[tokenAddress][tokenId].defiTokens;
+            uint256 _initialWorth = lentNswapList[tokenAddress][tokenId].initialWorth;
+            //uint256 _defiTokens = lentNswapList[tokenAddress][tokenId].defiTokens;
             uint256 _interestEarned = 0; //placeholder value for now
             ///
             //  ** To CODE **
@@ -175,8 +171,8 @@ contract Nswap is Ownable, Pausable {
 
             // Send the interest to the lender if there is interest to send
             if (_interestEarned > 0) {
-                uint256 _platformFee = lendNswapList[tokenAddress][tokenId].platformFeesPercent;
-                uint256 _interestEarnedtMinusFees = _interestEarned * (1-_platformFee);
+                uint256 _platformFee = lentNswapList[tokenAddress][tokenId].protocolFeesPercent;
+                uint256 _interestEarnedMinusFees = _interestEarned * (1-_platformFee);
 
                 IERC20(acceptedPayTokenAddress).transfer(_lender, _interestEarnedMinusFees);
             }
@@ -199,29 +195,52 @@ contract Nswap is Ownable, Pausable {
     }
 
     function removeFromLendersWithTokens(address tokenAddress, uint256 tokenId) internal {
+        /////////////////////////////////////
+        // This for() function needs to be optimized to by gas efficient
+        //  ** To CODE **
+        /////////////////////////////////////     
+
         // Reset lenders to sent token mapping, swap with last element to fill the gap
         uint totalCount = lendersWithTokens.length;
         if (totalCount > 1) {
             for (uint i=0; i<totalCount; i++) {
                 NswapTokenEntry memory tokenEntry = lendersWithTokens[i];
                 if (tokenEntry.lenderAddress == msg.sender && tokenEntry.tokenAddress == tokenAddress && tokenEntry.tokenId == tokenId) {
-                    lenderWithTokens[i] = lendersWithTokens[totalCount-1]; // insert last from array
+                    lendersWithTokens[i] = lendersWithTokens[totalCount-1]; // insert last from array
                 }
             }
-            lenderWithTokens.length--; 
+            //lendersWithTokens.length--; 
         }
         else {
-            delete lenderWithTokens[0];        
+            delete lendersWithTokens[0];        
         }
     }
 
-    function isDurationExpired(uint256 borrowedAtTimestamp, uint256 durationHours) public view returns(bool) {
-        uint256 secondsPassed = now - borrowedAtTimestamp;
+    function timeTillExpiration(address tokenAddress, uint256 tokenId) public view returns(uint hoursRemaining) {
+        uint256 _borrowedAtTimestamp = lentNswapList[tokenAddress][tokenId].borrowedAtTimestamp;
+        uint256 _durationHours = lentNswapList[tokenAddress][tokenId].durationHours;
+
+        uint256 secondsPassed = block.timestamp - _borrowedAtTimestamp;
         uint256 hoursPassed = secondsPassed * 60 * 60;
-        return hoursPassed > durationHours;
+
+        if (hoursPassed > _durationHours) {
+            hoursRemaining = 0;
+        }
+        else {
+            hoursRemaining = _durationHours - hoursPassed;
+        }
     }
 
-    function calculateLendSum(address tokenAddress, uint256 tokenId) public view returns(bool) {
+    function isDurationExpired(address tokenAddress, uint256 tokenId) public view returns(bool) {
+        uint256 _borrowedAtTimestamp = lentNswapList[tokenAddress][tokenId].borrowedAtTimestamp;
+        uint256 _durationHours = lentNswapList[tokenAddress][tokenId].durationHours;
+
+        uint256 secondsPassed = block.timestamp - _borrowedAtTimestamp;
+        uint256 hoursPassed = secondsPassed * 60 * 60;
+        return hoursPassed > _durationHours;
+    }
+
+    function calculateLendSum(address tokenAddress, uint256 tokenId) public view returns(uint256) {
         uint256 _initialWorth = lentNswapList[tokenAddress][tokenId].initialWorth;
         return _initialWorth;
     }

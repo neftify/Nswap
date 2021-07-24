@@ -10,8 +10,12 @@
     "test": "echo \"Error: no test specified\" && exit 1"
   },
   "author": "Neftify Labs, INC",
-  "license": "ISC",
+  "license": "BUSL-1.1",
   "dependencies": {
-    "@openzeppelin/contracts": "^4.2.0"
+    "@openzeppelin/contracts": "^4.2.0",
+    "@truffle/hdwallet-provider": "^1.4.2",
+    "bip39": "^3.0.4",
+    "dotenv": "^10.0.0",
+    "truffle-hdwallet-provider": "^1.0.17"
   }
 }
