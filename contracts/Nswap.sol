@@ -8,18 +8,22 @@ import "@openzeppelin/contracts/utils/math/SafeMath.sol";
 import "@openzeppelin/contracts/access/Ownable.sol";
 import "@openzeppelin/contracts/security/Pausable.sol";
 
+import "./CompInt.sol";
+
 contract Nswap is Ownable, Pausable {
 
     // Version helper for migrations
     uint256 migrateVersion;
 
     address public acceptedPayTokenAddress;
+    address public acceptedPayTokenCompAddress;
     uint256 public protocolFeesPercent;
 
     struct NswapForLend {
         uint256 durationHours;
         uint256 initialWorth;
         uint256 defiTokens;
+        uint256 interestEarned;
         uint256 borrowedAtTimestamp;
         address lender;
         address borrower;
@@ -50,8 +54,12 @@ contract Nswap is Ownable, Pausable {
         acceptedPayTokenAddress = tokenAddress;
     }
 
-    function setProtocolFeesPercent(uint256 feePercent) public onlyOwner whenNotPaused {
-        protocolFeesPercent = feePercent;
+    function setAcceptedPayTokenCompAddress(address tokenAddress) public onlyOwner whenNotPaused {
+        acceptedPayTokenCompAddress = tokenAddress;
+    }
+
+    function setProtocolFeesPercent(uint256 feesPercent) public onlyOwner whenNotPaused {
+        protocolFeesPercent = feesPercent;
     }
 
     function addToLending(address tokenAddress, uint256 tokenId, uint256 durationHours, uint256 initialWorth) public whenNotPaused {
@@ -62,9 +70,22 @@ contract Nswap is Ownable, Pausable {
 
         IERC721(tokenAddress).transferFrom(msg.sender, address(this), tokenId);
 
-        lentNswapList[tokenAddress][tokenId] = NswapForLend(durationHours, initialWorth, 0, 0, msg.sender, address(0), false, protocolFeesPercent);
+        lentNswapList[tokenAddress][tokenId] = NswapForLend(durationHours, initialWorth, 0, 0, 0, msg.sender, address(0), false, protocolFeesPercent);
 
         lendersWithTokens.push(NswapTokenEntry(msg.sender, tokenAddress, tokenId));
+
+        emit NswapForLendUpdated(tokenAddress, tokenId);
+    }
+
+    function editLending(address tokenAddress, uint256 tokenId, uint256 durationHours, uint256 initialWorth) public whenNotPaused {
+        require(lentNswapList[tokenAddress][tokenId].lender == msg.sender, 'Edit: Only the lender can perform this action');
+        require(initialWorth > 0, 'Edit: Initial token must be woth more than 0');
+        require(durationHours > 24, 'Edit: Lending duration must be 1 day or above');
+        require(lentNswapList[tokenAddress][tokenId].borrower == address(0), 'Edit: Token already lent');
+        require(lentNswapList[tokenAddress][tokenId].lenderClaimedCollateral == false, 'Edit: Time already expired and collateral was liquidated to lender');
+
+        lentNswapList[tokenAddress][tokenId].durationHours = durationHours;
+        lentNswapList[tokenAddress][tokenId].initialWorth = initialWorth;
 
         emit NswapForLendUpdated(tokenAddress, tokenId);
     }
@@ -87,7 +108,7 @@ contract Nswap is Ownable, Pausable {
         IERC721(tokenAddress).transferFrom(address(this), msg.sender, tokenId);
 
         // reset lenders to sent token mapping, swap with last element to fill the gap
-        lentNswapList[tokenAddress][tokenId] = NswapForLend(0, 0, 0, 0, address(0), address(0), false, 0);
+        lentNswapList[tokenAddress][tokenId] = NswapForLend(0, 0, 0, 0, 0, address(0), address(0), false, 0);
         removeFromLendersWithTokens(tokenAddress, tokenId);
 
         emit NswapForLendRemoved(tokenAddress, tokenId);
@@ -99,11 +120,12 @@ contract Nswap is Ownable, Pausable {
         require(isDurationExpired(tokenAddress, tokenId), 'Claim: Cannot claim before lending expires');
         require(lentNswapList[tokenAddress][tokenId].lenderClaimedCollateral == false, 'Claim: Already claimed collateral');
 
-        ////////////////////////////
-        //**  */
-        //send collateral with interest to the lender minus platform fees
-        //** to code */
-        ////////////////////////////
+        address _lender = lentNswapList[tokenAddress][tokenId].lender;
+        uint256 _initialWorth = lentNswapList[tokenAddress][tokenId].initialWorth;
+
+        // Send collateral and Interest to lender minus platform fees
+        IERC20(acceptedPayTokenAddress).transfer(_lender, _initialWorth);
+        sendInterestToLender(tokenAddress, tokenId);
 
         // reset lenders to sent token mapping, swap with last element to fill gap
         lentNswapList[tokenAddress][tokenId].lenderClaimedCollateral = true;
@@ -138,18 +160,31 @@ contract Nswap is Ownable, Pausable {
         lentNswapList[tokenAddress][tokenId].borrower = msg.sender;
         lentNswapList[tokenAddress][tokenId].borrowedAtTimestamp = block.timestamp;
 
-        ////////////////////////////
-        // DEFI Protocol API - Send Collateral to work
-        lentNswapList[tokenAddress][tokenId].defiTokens = 0;
-        //  ** To CODE **
-        ////////////////////////////
+        // Create a reference to the underlying asset contract, like DAI.
+        Erc20 underlying = Erc20(acceptedPayTokenAddress);
+
+        // Create a reference to the corresponding cToken contract, like cDAI
+        CErc20 cToken = CErc20(acceptedPayTokenCompAddress);
+
+        // Amount of current exchange rate from cToken to underlying
+        uint256 exchangeRateMantissa = cToken.exchangeRateCurrent();
+
+        // Approve transfer on the ERC20 contract
+        underlying.approve(acceptedPayTokenCompAddress, _requiredSum);
+
+        // Mint cTokens
+        uint mintResult = cToken.mint(_requiredSum);
+
+        // Success is 0
+        require(mintResult == 0, 'Borrowing: An error ocurred while depositing the collateral');
+
+        // Record the amount of tokens formula: underlying Token / currentExchangeRate
+        lentNswapList[tokenAddress][tokenId].defiTokens = _requiredSum / exchangeRateMantissa;
 
         emit NswapForLendUpdated(tokenAddress, tokenId);
     }
 
-    function stopBorrowing(address tokenAddress, uint256 tokenId) public whenNotPaused {
-        address _lender = lentNswapList[tokenAddress][tokenId].lender;
-
+    function stopBorrowing(address tokenAddress, uint256 tokenId) public whenNotPaused returns(bool) {
         address _borrower = lentNswapList[tokenAddress][tokenId].borrower;
         require(_borrower == msg.sender, 'Stop: Only the active borrower can stop borrowing');
 
@@ -157,49 +192,62 @@ contract Nswap is Ownable, Pausable {
             // Assuming NFT token transfer is approved
             IERC721(tokenAddress).transferFrom(msg.sender, address(this), tokenId);
 
-            ////////////////////////////
             // Get the collateral from DEFI Protocol
+            getCollateralFromDefi(tokenAddress, tokenId);
+
+            // Send back the collateral to the Borrower and Interest to lender minus platform fees
             uint256 _initialWorth = lentNswapList[tokenAddress][tokenId].initialWorth;
-            //uint256 _defiTokens = lentNswapList[tokenAddress][tokenId].defiTokens;
-            uint256 _interestEarned = 0; //placeholder value for now
-            ///
-            //  ** To CODE **
-            /////////////////////////////////////
-
-            // Send back the collateral to the Borrower
             IERC20(acceptedPayTokenAddress).transfer(_borrower, _initialWorth);
-
-            // Send the interest to the lender if there is interest to send
-            if (_interestEarned > 0) {
-                uint256 _platformFee = lentNswapList[tokenAddress][tokenId].protocolFeesPercent;
-                uint256 _interestEarnedMinusFees = _interestEarned * (1-_platformFee);
-
-                IERC20(acceptedPayTokenAddress).transfer(_lender, _interestEarnedMinusFees);
-            }
+            sendInterestToLender(tokenAddress, tokenId);
 
             // Reset settings so the token can be borrowed again
             lentNswapList[tokenAddress][tokenId].borrower = address(0);
             lentNswapList[tokenAddress][tokenId].borrowedAtTimestamp = 0;
+            lentNswapList[tokenAddress][tokenId].interestEarned = 0;
         }
         else {
-            // Lender already claimed collateral, borrower can keep token it
-            lentNswapList[tokenAddress][tokenId] = NswapForLend(0, 0, 0, 0, address(0), address(0), false, 0); //reset
-
-            /////////////////////////////////////
-            // Let the borrower know that he can keep the NFT
-            //  ** To CODE **
-            /////////////////////////////////////
+            // Lender already claimed collateral, borrower can keep token it; reset token
+            lentNswapList[tokenAddress][tokenId] = NswapForLend(0, 0, 0, 0, 0, address(0), address(0), false, 0);
+            return false;
         }
 
         emit NswapForLendUpdated(tokenAddress, tokenId);
+        return true;
+    }
+
+    function getCollateralFromDefi(address tokenAddress, uint256 tokenId) internal {
+        uint256 redeemResult;
+        CErc20 cToken = CErc20(acceptedPayTokenCompAddress);
+        redeemResult = cToken.redeem(lentNswapList[tokenAddress][tokenId].defiTokens);
+
+        // Success is 0
+        require(redeemResult == 0, 'An error ocurred while retriving the collateral');
+
+        // Lets calculate the interest earned
+        uint256 _initialWorth = lentNswapList[tokenAddress][tokenId].initialWorth;
+
+        // Formula cTokens * currentExchangeRate
+        uint256 exchangeRateMantissa = cToken.exchangeRateCurrent();
+        uint256 _newBalance = lentNswapList[tokenAddress][tokenId].defiTokens * exchangeRateMantissa;
+
+        uint256 _interestEarned = _newBalance - _initialWorth;
+
+        lentNswapList[tokenAddress][tokenId].interestEarned = _interestEarned;
+    }
+
+    function sendInterestToLender(address tokenAddress, uint256 tokenId) internal {
+        address _lender = lentNswapList[tokenAddress][tokenId].lender;
+        uint256 _interestEarned = lentNswapList[tokenAddress][tokenId].interestEarned; 
+            
+        if (_interestEarned > 0) {
+            uint256 _platformFee = lentNswapList[tokenAddress][tokenId].protocolFeesPercent;
+            uint256 _interestEarnedMinusFees = _interestEarned * (1-_platformFee);
+
+            IERC20(acceptedPayTokenAddress).transfer(_lender, _interestEarnedMinusFees);
+        }
     }
 
     function removeFromLendersWithTokens(address tokenAddress, uint256 tokenId) internal {
-        /////////////////////////////////////
-        // This for() function needs to be optimized to by gas efficient
-        //  ** To CODE **
-        /////////////////////////////////////     
-
         // Reset lenders to sent token mapping, swap with last element to fill the gap
         uint totalCount = lendersWithTokens.length;
         if (totalCount > 1) {
@@ -209,7 +257,8 @@ contract Nswap is Ownable, Pausable {
                     lendersWithTokens[i] = lendersWithTokens[totalCount-1]; // insert last from array
                 }
             }
-            //lendersWithTokens.length--; 
+            // Remove last element
+            lendersWithTokens.pop();
         }
         else {
             delete lendersWithTokens[0];        
